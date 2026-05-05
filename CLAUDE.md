@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Mobile-first PWA that generates a high-protein vegetarian weekly (or single-day) menu using the Anthropic Claude API. Each generated dish includes ingredients, recipe steps, and macros. Single-user, no backend, no login — API key + saved menu live in `localStorage`.
+Mobile-first PWA that generates a high-protein vegetarian weekly (or single-day) menu using the Anthropic Claude API. Each generated dish includes ingredients, recipe steps, and macros. Originally built as a personal local-only app; also deployable to Cloudflare Workers so a small group can share access via a passcode.
 
 ## Commands
 
@@ -13,33 +13,50 @@ Mobile-first PWA that generates a high-protein vegetarian weekly (or single-day)
 - `npm run lint` — ESLint.
 - `npm run preview` — serve the production build locally.
 - `npx tsc -b` — typecheck only, faster iteration than full build.
+- `npx wrangler deploy` — push the built `dist/` + `worker.js` to Cloudflare. Worker reads `APP_PASSCODE` and `ANTHROPIC_API_KEY` from Cloudflare secrets (set with `wrangler secret put`).
 
 There is no test framework wired up.
 
 ## How the Claude API integration is structured
 
-The API integration (`src/lib/`) is the heart of this app and has several non-obvious constraints baked in. Read this section before changing anything in `generateWeek.ts`, `schemas.ts`, or `anthropic.ts`.
+The API integration (`src/lib/`) is the heart of this app. Several non-obvious constraints are baked in — read this before changing `generateWeek.ts`, `schemas.ts`, `anthropic.ts`, or `worker.js`.
 
-**Model + key handling** (`anthropic.ts`)
-- Uses `claude-haiku-4-5-20251001` for cost. Pricing constants live in `generateWeek.ts` (input/output/cache-read/cache-write per MTok) — keep them in sync with Anthropic's published rates.
-- API key is read from `localStorage` (Settings UI) OR `import.meta.env.VITE_ANTHROPIC_API_KEY` (`.env.local`). `resolveApiKey()` falls back env-var → settings.
-- SDK is called from the browser with `dangerouslyAllowBrowser: true`. This is justified because it's a personal local-only app with the user's own key. **Do not deploy a public build with a key set** — Vite inlines `VITE_*` env vars into the JS bundle.
+**Auth: two modes** (`anthropic.ts`)
+- `getClient(settings)` returns a `MessagesClient` — a minimal interface (`messages.create(...)`) that both real-SDK and proxy implementations satisfy. The rest of `lib/` programs against this interface, not the SDK directly.
+- **Direct mode (dev / personal):** API key from `localStorage` (Settings UI) or `import.meta.env.VITE_ANTHROPIC_API_KEY`. Uses the `@anthropic-ai/sdk` directly in the browser with `dangerouslyAllowBrowser: true`.
+- **Proxy mode (deployed / shared):** user enters a shared passcode in Settings. `ProxyClient` POSTs to `/api/anthropic` with an `x-passcode` header. The Cloudflare Worker (`worker.js`) validates the passcode and forwards to Anthropic with the server-held key. The browser never sees the real key.
+- `resolveAuth()` precedence: passcode wins if both are set (so testing the proxy path is easy when you have both).
+- Uses model `claude-haiku-4-5-20251001` for cost. Pricing constants live in `generateWeek.ts` (input/output/cache-read/cache-write per MTok) — keep them in sync with Anthropic's published rates.
+- **Do not deploy a public build with `VITE_ANTHROPIC_API_KEY` set** — Vite inlines `VITE_*` vars into the JS bundle. The deployed app should rely on the proxy + passcode.
 
-**Schema design** (`schemas.ts`) is deliberately compact
-- Field names are intentionally short (`mins`, `ing`, `rec`, `m.p/c/f/k`) — every field name in tool_use output costs tokens. Long field names (`prepMinutes`, `quantity`, `category`) added ~40% to per-dish output and caused truncation under the 10K OTPM rate limit.
-- The compact wire format is unpacked into the normal `Dish` type at the API boundary in `generateWeek.ts::unpack()`. The rest of the app uses the friendly type. Don't propagate compact names beyond `unpack()`.
+**Schema design — a deliberate split** (`schemas.ts` + inline format in `generateWeek.ts`)
+- **Tool_use calls (`generateDay`, `swapDish`)** use **verbose** field names defined in `schemas.ts` (`name`, `cuisine`, `meal`, `totalMinutes`, `ingredients`, `recipe`, `macros.{protein,carbs,fat,calories}`). An earlier compact tool_use schema was unreliable — the model occasionally dropped fields under tool_use mode. Verbose names made it dramatically more consistent.
+- **`generateWeek`** uses a different format: a **compact** JSON shape (`n`, `c`, `t`, `i`, `r`, `m.{p,c,f,k}`, `x`) defined INLINE in the prompt as `COMPACT_FORMAT_INSTRUCTIONS`, NOT in `schemas.ts`. This is because `generateWeek` emits 21 dishes in one response and short field names cut output tokens significantly (every field name repeated 21x).
+- The verbose tool_use shape is unpacked via `unpackTool()`. The compact prefilled-JSON shape is unpacked via `compactToDish()` + `parseIngredient()` (regex-parses strings like `"200 g paneer"` into structured ingredients).
+- The rest of the app uses the friendly `Dish` type — don't propagate either wire format past `unpackTool` / `compactToDish`.
 
-**Generation architecture: plan + per-day detail**
-- `generateWeek` does **not** generate all 21 dishes in one call. The single-call approach kept hitting `stop_reason: "max_tokens"` against the 10K OTPM ceiling on tier-1 accounts.
-- Instead: 1 small `planMenu()` call returns 21 dish names + cuisines, then 7 parallel `detailDay()` calls flesh each day out. Concurrency is capped at 3 in `mapWithConcurrency`.
-- Total budget: plan (700) + 7 × 1300 = 9700 tokens, just under the 10K OTPM cap. **Do not raise these limits casually** — test against an actual rate-limited account.
-- `generateDay()` is a single call with max_tokens 4000 (only one call → no OTPM concern).
-- `swapDish()` regenerates one slot, gets the existing 20 dish names in the prompt to avoid duplicates.
+**Generation architecture: prefilled JSON for the week, tool_use for day/swap**
+- `generateWeek` uses **prefilled JSON, not tool_use**. The user message asks for a JSON array, the assistant message is prefilled with `[`, and the model continues writing the array. Switched to from a multi-call plan+detail approach (commit `3fab8f3`) — both simplifies the code and stays under the OTPM cap by using the compact wire format.
+  - `max_tokens: 7000` for this call. Don't raise without watching `usage.output_tokens`.
+  - Response is reconstructed: `"[" + textBlock.text`, then trimmed at the last `]` to handle any trailing prose despite instructions.
+  - Validates: parse succeeds, length is 21, every dish has `n`, `m`, `i[]`, `r[]`. Throws specific errors when these fail (the user can just re-tap "Plan this week").
+- `generateDay` is a tool_use call (`submit_day`) with `max_tokens: 4000`. **Validation + retry-once**: if any of the three slots fails `isCompleteRawDish`, calls `callDay` again with a stricter reminder appended to the user message. If still incomplete, throws. Cost is summed across both attempts via `addCost`.
+- `swapDish` is a tool_use call (`submit_dish`) with `max_tokens: 1500`. Validates with `isCompleteRawDish`. Receives the existing 20 dish names in the prompt to avoid duplicates. No auto-retry — single call, user re-clicks if it fails.
 
 **Caching, retries, errors**
-- The system prompt is cached (`cache_control: ephemeral`) on every call so cost stays low across plan + 7 detail + swap calls.
-- `withRetry` in `concurrency.ts` honors HTTP 429 `retry-after`. Don't bypass it.
-- All generation functions check `stop_reason === "max_tokens"` and throw a specific error. `console.log` of `res.usage` is intentional — kept for debugging future schema-size changes.
+- The system prompt is cached (`cache_control: ephemeral`) on every call, so cost stays low across week + day + swap calls within the cache TTL.
+- `withRetry` in `concurrency.ts` honors HTTP 429 `retry-after`. Used on every API call. Don't bypass it.
+- All generation functions check `stop_reason === "max_tokens"` and throw a specific error.
+- `console.log` of `res.usage` and `stop_reason` is intentional — kept for debugging future schema-size or rate-limit issues.
+
+## Cloudflare deployment (`worker.js`, `wrangler.jsonc`)
+
+- `worker.js` is the Workers entry: routes `/api/anthropic` to the proxy handler, everything else to the static-asset binding (`env.ASSETS`).
+- `wrangler.jsonc` mounts `./dist` as static assets with `not_found_handling: "single-page-application"` so client-side routes resolve to `index.html`.
+- The proxy buffers the upstream response (`upstream.text()`) before returning instead of streaming the body — this avoids edge-case streaming/transfer-encoding issues that occasionally caused the SDK on the browser side to receive a malformed payload. Don't switch back to streaming without testing.
+- `retry-after` from the upstream response is propagated so `withRetry` on the client side can honor it.
+- Two Cloudflare env vars required: `APP_PASSCODE` (the shared passcode) and `ANTHROPIC_API_KEY`. Set with `wrangler secret put <NAME>`.
+- `.npmrc` sets `legacy-peer-deps=true` so the Cloudflare build pipeline (which runs `npm install`) succeeds with a transitive peer-dep mismatch in the deps tree. Don't remove without verifying the build still works.
 
 ## App architecture
 
@@ -67,4 +84,5 @@ The API integration (`src/lib/`) is the heart of this app and has several non-ob
 - **Routing**: `react-router-dom` v7.
 - **PDF**: `jspdf` + `jspdf-autotable`.
 - **Icons**: `lucide-react` v1.x — note this is an older version, some icon names differ from the current lucide. If `import { Foo } from "lucide-react"` fails, check the actual installed icons in `node_modules/lucide-react/dist/esm/icons/` before assuming the name is wrong.
-- **Anthropic**: `@anthropic-ai/sdk` used directly in the browser. The SDK pulls in Node-only credential modules that Vite externalizes harmlessly (warnings during build are expected, not errors).
+- **Anthropic**: `@anthropic-ai/sdk` used directly in the browser in dev/personal mode. The SDK pulls in Node-only credential modules that Vite externalizes harmlessly (warnings during build are expected, not errors).
+- **Cloudflare**: `wrangler` for deploy; `worker.js` is hand-written, no framework.
