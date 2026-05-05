@@ -49,9 +49,22 @@ async function handleAnthropic(request, env) {
     body,
   });
 
+  // Buffer the full response before forwarding. Avoids any edge-case
+  // streaming/transfer-encoding weirdness — the JSON arrives intact.
+  const responseText = await upstream.text();
+
+  console.log(
+    "[proxy]",
+    upstream.status,
+    "in:",
+    body.length,
+    "out:",
+    responseText.length,
+  );
+
   const headers = { "Content-Type": "application/json" };
   const retryAfter = upstream.headers.get("retry-after");
   if (retryAfter) headers["retry-after"] = retryAfter;
 
-  return new Response(upstream.body, { status: upstream.status, headers });
+  return new Response(responseText, { status: upstream.status, headers });
 }

@@ -1,5 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
-import { getClient, MODEL_ID } from "./anthropic";
+import { getClient, MODEL_ID, type MessagesClient } from "./anthropic";
 import { DAY_SCHEMA, DISH_SCHEMA } from "./schemas";
 import { withRetry } from "./concurrency";
 import type {
@@ -70,6 +70,16 @@ function calcCost(usage: Anthropic.Messages.Usage): RunCost {
       (output * COST_PER_MTOK_OUTPUT) / 1_000_000 +
       (cacheRead * COST_PER_MTOK_CACHE_READ) / 1_000_000 +
       (cacheWrite * COST_PER_MTOK_CACHE_WRITE) / 1_000_000,
+  };
+}
+
+function addCost(a: RunCost, b: RunCost): RunCost {
+  return {
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
+    cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
+    usd: a.usd + b.usd,
   };
 }
 
@@ -290,47 +300,119 @@ ${COMPACT_FORMAT_INSTRUCTIONS}`;
   };
 }
 
-// Compact wire format from tool_use (still used for day + swap — single calls, no rate-limit pressure).
-type RawIng = { n: string; q: number; u: string; c: IngredientCategory };
-type RawMacros = { p: number; c: number; f: number; k: number };
+// Tool_use response shape (verbose field names — easier for the model to honor reliably).
+type RawIng = {
+  name: string;
+  quantity: number;
+  unit: string;
+  category: IngredientCategory;
+};
+type RawMacros = { protein: number; carbs: number; fat: number; calories: number };
 type RawDish = {
   name: string;
-  mins: number;
-  ing: RawIng[];
-  rec: string[];
+  cuisine: Cuisine;
+  meal: MealSlot;
+  totalMinutes: number;
+  ingredients: RawIng[];
+  recipe: string[];
   tip?: string;
-  m: RawMacros;
+  macros: RawMacros;
 };
 type ToolDayResult = { breakfast: RawDish; lunch: RawDish; dinner: RawDish };
 
+function isCompleteRawDish(d: unknown): d is RawDish {
+  const r = d as RawDish | null | undefined;
+  return Boolean(
+    r &&
+      typeof r.name === "string" &&
+      typeof r.totalMinutes === "number" &&
+      Array.isArray(r.ingredients) &&
+      Array.isArray(r.recipe) &&
+      r.macros &&
+      typeof r.macros.protein === "number" &&
+      typeof r.macros.calories === "number",
+  );
+}
+
 function unpackTool(
   raw: RawDish,
-  cuisine: Cuisine,
+  cuisineFallback: Cuisine,
   slot: MealSlot,
   servings: number,
 ): Dish {
-  const ingredients: Ingredient[] = (raw.ing || []).map((i) => ({
-    name: i.n,
-    quantity: i.q,
-    unit: i.u,
-    category: i.c,
+  const ingredients: Ingredient[] = (raw.ingredients || []).map((i) => ({
+    name: i.name,
+    quantity: i.quantity,
+    unit: i.unit,
+    category: i.category,
   }));
   return {
     id: crypto.randomUUID(),
     name: raw.name,
-    cuisine,
+    cuisine: raw.cuisine || cuisineFallback,
     meal: slot,
     servings,
-    totalMinutes: raw.mins,
+    totalMinutes: raw.totalMinutes,
     ingredients,
-    recipe: raw.rec || [],
+    recipe: raw.recipe || [],
     tip: raw.tip?.trim() || undefined,
     macros: {
-      protein: raw.m.p,
-      carbs: raw.m.c,
-      fat: raw.m.f,
-      calories: raw.m.k,
+      protein: raw.macros.protein,
+      carbs: raw.macros.carbs,
+      fat: raw.macros.fat,
+      calories: raw.macros.calories,
     },
+  };
+}
+
+async function callDay(
+  client: MessagesClient,
+  opts: RunOptions,
+  attempt: number,
+): Promise<{ day: ToolDayResult; cost: RunCost; usage: Anthropic.Messages.Usage; stopReason: string | null }> {
+  const userMsg = `Plan today's 3 meals (breakfast, lunch, dinner). All 3 differ in cuisine or main protein.
+
+${preferencesBlock(opts)}
+
+Submit ALL three meals via submit_day. Every dish must include name, cuisine, meal, totalMinutes, ingredients, recipe, and macros.${
+    attempt > 0 ? "\n\nIMPORTANT: ensure every dish has a complete macros object (protein, carbs, fat, calories)." : ""
+  }`;
+
+  const res = await withRetry(() =>
+    client.messages.create({
+      model: MODEL_ID,
+      max_tokens: 4000,
+      system: [
+        { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
+      ],
+      tools: [
+        {
+          name: "submit_day",
+          description: "Submit today's 3-dish menu.",
+          input_schema: DAY_SCHEMA as unknown as ToolSchema,
+        },
+      ],
+      tool_choice: { type: "tool", name: "submit_day" },
+      messages: [{ role: "user", content: userMsg }],
+    }),
+  );
+
+  console.log(`[generateDay attempt ${attempt}] usage:`, res.usage, "stop_reason:", res.stop_reason);
+
+  const toolUse = res.content.find((b) => b.type === "tool_use");
+  if (!toolUse || toolUse.type !== "tool_use") {
+    console.error("[generateDay] non-tool content:", res.content);
+    throw new Error("Model did not use the submit_day tool.");
+  }
+  if (res.stop_reason === "max_tokens") {
+    throw new Error(`Truncated at ${res.usage.output_tokens}/4000 tokens. Try again.`);
+  }
+
+  return {
+    day: toolUse.input as ToolDayResult,
+    cost: calcCost(res.usage),
+    usage: res.usage,
+    stopReason: res.stop_reason,
   };
 }
 
@@ -343,41 +425,28 @@ export async function generateDay(
   const opts = settingsToOptions(settings, override);
   onProgress?.("Generating today's menu…");
 
-  const userMsg = `Plan today's 3 meals (breakfast, lunch, dinner). All 3 differ in cuisine or main protein.
+  // Auto-retry once if the model returns an incomplete dish (intermittent issue).
+  let result = await callDay(client, opts, 0);
+  let totalCost = result.cost;
 
-${preferencesBlock(opts)}
-
-Submit via submit_day.`;
-
-  const res = await withRetry(() =>
-    client.messages.create({
-      model: MODEL_ID,
-      max_tokens: 4000,
-      system: [
-        { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
-      ],
-      tools: [
-        {
-          name: "submit_day",
-          description: "Submit today's 3-dish menu using compact field names.",
-          input_schema: DAY_SCHEMA as unknown as ToolSchema,
-        },
-      ],
-      tool_choice: { type: "tool", name: "submit_day" },
-      messages: [{ role: "user", content: userMsg }],
-    }),
-  );
-
-  console.log("[generateDay] usage:", res.usage, "stop_reason:", res.stop_reason);
-
-  const toolUse = res.content.find((b) => b.type === "tool_use");
-  if (!toolUse || toolUse.type !== "tool_use") throw new Error("Model returned no tool use.");
-  if (res.stop_reason === "max_tokens") {
-    throw new Error(`Truncated at ${res.usage.output_tokens}/4000 tokens. Try again.`);
+  if (
+    !isCompleteRawDish(result.day?.breakfast) ||
+    !isCompleteRawDish(result.day?.lunch) ||
+    !isCompleteRawDish(result.day?.dinner)
+  ) {
+    console.warn("[generateDay] incomplete on attempt 0, retrying:", result.day);
+    onProgress?.("First pass incomplete — retrying…");
+    result = await callDay(client, opts, 1);
+    totalCost = addCost(totalCost, result.cost);
   }
-  const day = toolUse.input as ToolDayResult;
-  if (!day?.breakfast?.m || !day?.lunch?.m || !day?.dinner?.m) {
-    throw new Error("Got an incomplete menu. Try again.");
+
+  if (
+    !isCompleteRawDish(result.day?.breakfast) ||
+    !isCompleteRawDish(result.day?.lunch) ||
+    !isCompleteRawDish(result.day?.dinner)
+  ) {
+    console.error("[generateDay] still incomplete after retry:", result.day);
+    throw new Error("Couldn't get a complete menu after retrying. Try again in a moment.");
   }
 
   const guess = (s: MealSlot): Cuisine =>
@@ -391,13 +460,13 @@ Submit via submit_day.`;
       days: [
         {
           date: today,
-          breakfast: unpackTool(day.breakfast, guess("breakfast"), "breakfast", opts.servings),
-          lunch: unpackTool(day.lunch, guess("lunch"), "lunch", opts.servings),
-          dinner: unpackTool(day.dinner, guess("dinner"), "dinner", opts.servings),
+          breakfast: unpackTool(result.day.breakfast, guess("breakfast"), "breakfast", opts.servings),
+          lunch: unpackTool(result.day.lunch, guess("lunch"), "lunch", opts.servings),
+          dinner: unpackTool(result.day.dinner, guess("dinner"), "dinner", opts.servings),
         },
       ],
     },
-    cost: calcCost(res.usage),
+    cost: totalCost,
   };
 }
 
@@ -423,7 +492,7 @@ export async function swapDish(
   const userMsg = `Replace the ${slot} for day ${dayIndex + 1}. Must NOT match: ${existingNames}.
 ${reason ? `User reason: ${reason}.` : ""}
 Cuisine: ${cuisinePref === "either" ? "indian or western" : cuisinePref}. Servings: ${opts.servings}. ~${Math.round(opts.proteinTargetG / 3)}g+ protein/serving. Dislikes: ${opts.dislikedIngredients.join(", ") || "none"}.
-Submit via submit_dish.`;
+Submit via submit_dish. Include name, cuisine, meal, totalMinutes, ingredients, recipe, and complete macros (protein, carbs, fat, calories).`;
 
   const res = await withRetry(() =>
     client.messages.create({
@@ -435,7 +504,7 @@ Submit via submit_dish.`;
       tools: [
         {
           name: "submit_dish",
-          description: "Submit a single replacement dish using compact field names.",
+          description: "Submit a single replacement dish.",
           input_schema: DISH_SCHEMA as unknown as ToolSchema,
         },
       ],
@@ -452,10 +521,12 @@ Submit via submit_dish.`;
     throw new Error(`Swap truncated at ${res.usage.output_tokens}/1500. Try again.`);
   }
   const raw = toolUse.input as RawDish;
-  if (!raw?.m) throw new Error("Swap returned incomplete data.");
+  if (!isCompleteRawDish(raw)) {
+    console.error("[swapDish] incomplete dish:", raw);
+    throw new Error("Swap returned incomplete data. Try again.");
+  }
 
-  const cuisine: Cuisine =
-    cuisinePref === "western" ? "western" : "indian";
+  const cuisine: Cuisine = raw.cuisine || (cuisinePref === "western" ? "western" : "indian");
   return {
     dish: unpackTool(raw, cuisine, slot, opts.servings),
     cost: calcCost(res.usage),

@@ -1,80 +1,52 @@
-// Compact schemas — short field names cut output tokens significantly.
-// Each "name", "qty", etc. is 1-2 tokens vs "ingredientName", "quantity" being 4-5.
-// Per-day output drops from ~1500 tokens to ~700 tokens with this schema.
+// Schemas for tool_use calls (day + swap). Use natural field names so the
+// model is less likely to misformat the response. The prefilled JSON path
+// (used by generateWeek) uses tighter compact names because it's documented
+// inline in the prompt; that's a separate format defined in generateWeek.ts.
 
 export const DISH_SCHEMA = {
   type: "object",
   properties: {
     name: { type: "string", description: "Authentic dish name." },
-    mins: { type: "number", description: "Total prep + cook time in minutes." },
-    ing: {
+    cuisine: { type: "string", enum: ["indian", "western"] },
+    meal: { type: "string", enum: ["breakfast", "lunch", "dinner"] },
+    totalMinutes: { type: "number", description: "Total prep + cook time." },
+    ingredients: {
       type: "array",
-      description: "Ingredients. Each is a single object.",
       items: {
         type: "object",
         properties: {
-          n: { type: "string", description: "Short lowercase name. Indian spices/dals can embed Hindi like 'haldi/turmeric', 'jeera', 'urad dal'. Skip Hindi for obvious items like tomato, onion, salt." },
-          q: { type: "number", description: "Quantity." },
-          u: { type: "string", enum: ["g", "ml", "tbsp", "tsp", "piece", "cup", "pinch"] },
-          c: { type: "string", enum: ["produce", "dairy", "grains", "legumes", "spices", "pantry", "other"] },
+          name: { type: "string", description: "Short lowercase name. Indian spices/dals can embed Hindi like 'haldi/turmeric', 'jeera', 'urad dal'. Skip Hindi for obvious items." },
+          quantity: { type: "number" },
+          unit: { type: "string", enum: ["g", "ml", "tbsp", "tsp", "piece", "cup", "pinch"] },
+          category: { type: "string", enum: ["produce", "dairy", "grains", "legumes", "spices", "pantry", "other"] },
         },
-        required: ["n", "q", "u", "c"],
+        required: ["name", "quantity", "unit", "category"],
       },
     },
-    rec: {
+    recipe: {
       type: "array",
       items: { type: "string" },
       minItems: 4,
       maxItems: 5,
-      description: "4-5 terse numbered steps for an Indian home cook. One short sentence each. Include sensory cue (e.g. 'until oil separates'). Use desi terms where natural.",
+      description: "4-5 terse numbered steps. Each step: one short sentence with action + sensory cue (e.g. 'until oil separates'). Use desi terms (tadka, bhuno) where natural.",
     },
     tip: {
       type: "string",
       description: "Optional 1-sentence cook tip. Empty string if none.",
     },
-    m: {
+    macros: {
       type: "object",
-      description: "Macros per serving.",
+      description: "Per serving.",
       properties: {
-        p: { type: "number", description: "Protein in grams." },
-        c: { type: "number", description: "Carbs in grams." },
-        f: { type: "number", description: "Fat in grams." },
-        k: { type: "number", description: "Calories." },
+        protein: { type: "number", description: "grams" },
+        carbs: { type: "number", description: "grams" },
+        fat: { type: "number", description: "grams" },
+        calories: { type: "number" },
       },
-      required: ["p", "c", "f", "k"],
+      required: ["protein", "carbs", "fat", "calories"],
     },
   },
-  required: ["name", "mins", "ing", "rec", "m"],
-} as const;
-
-const PLAN_SLOT_SCHEMA = {
-  type: "object",
-  properties: {
-    name: { type: "string", description: "Distinct dish name." },
-    cuisine: { type: "string", enum: ["indian", "western"] },
-  },
-  required: ["name", "cuisine"],
-} as const;
-
-export const PLAN_SCHEMA = {
-  type: "object",
-  properties: {
-    days: {
-      type: "array",
-      minItems: 7,
-      maxItems: 7,
-      items: {
-        type: "object",
-        properties: {
-          breakfast: PLAN_SLOT_SCHEMA,
-          lunch: PLAN_SLOT_SCHEMA,
-          dinner: PLAN_SLOT_SCHEMA,
-        },
-        required: ["breakfast", "lunch", "dinner"],
-      },
-    },
-  },
-  required: ["days"],
+  required: ["name", "cuisine", "meal", "totalMinutes", "ingredients", "recipe", "macros"],
 } as const;
 
 export const DAY_SCHEMA = {
