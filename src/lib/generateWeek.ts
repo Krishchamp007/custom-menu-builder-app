@@ -1,7 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { getClient, MODEL_ID } from "./anthropic";
-import { DAY_SCHEMA, DISH_SCHEMA, PLAN_SCHEMA } from "./schemas";
-import { mapWithConcurrency, withRetry } from "./concurrency";
+import { DAY_SCHEMA, DISH_SCHEMA } from "./schemas";
+import { withRetry } from "./concurrency";
 import type {
   Cuisine,
   Dish,
@@ -28,32 +28,14 @@ Rules:
 - Practical for a typical Indian kitchen.
 
 Recipe steps (the cook reads this directly):
-- 4-5 short numbered steps. One sentence each.
+- 4-5 short numbered steps. One sentence each, ≤100 characters.
 - Use desi verbs: tadka, bhuno, dum.
 - Each step has a sensory cue ("until oil separates", "till golden").
 
-Ingredient names: short lowercase. For spices/dals/less-obvious items, embed Hindi like "haldi/turmeric", "jeera", "urad dal", "kasuri methi". Skip Hindi for obvious items: tomato, onion, garlic, salt, oil.
+Ingredient names: short lowercase. For spices/dals/less-obvious items, embed Hindi like "haldi/turmeric", "jeera", "urad dal". Skip Hindi for obvious items.
 
-Macros: per serving, realistic.
+Macros: per serving, realistic.`;
 
-Output ONLY via the tool. Use the compact field names exactly as defined.`;
-
-// Compact wire format from the model.
-type RawIng = { n: string; q: number; u: string; c: IngredientCategory };
-type RawMacros = { p: number; c: number; f: number; k: number };
-type RawDish = {
-  name: string;
-  mins: number;
-  ing: RawIng[];
-  rec: string[];
-  tip?: string;
-  m: RawMacros;
-};
-type ToolDayResult = { breakfast: RawDish; lunch: RawDish; dinner: RawDish };
-type PlanSlot = { name: string; cuisine: Cuisine };
-type PlanResult = {
-  days: Array<{ breakfast: PlanSlot; lunch: PlanSlot; dinner: PlanSlot }>;
-};
 type ToolSchema = Anthropic.Messages.Tool["input_schema"];
 
 export type ProgressCb = (msg: string, done?: number, total?: number) => void;
@@ -91,48 +73,6 @@ function calcCost(usage: Anthropic.Messages.Usage): RunCost {
   };
 }
 
-function addCost(a: RunCost, b: RunCost): RunCost {
-  return {
-    inputTokens: a.inputTokens + b.inputTokens,
-    outputTokens: a.outputTokens + b.outputTokens,
-    cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
-    cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
-    usd: a.usd + b.usd,
-  };
-}
-
-// Compact wire format -> normalized Dish for the rest of the app.
-function unpack(
-  raw: RawDish,
-  cuisine: Cuisine,
-  slot: MealSlot,
-  servings: number,
-): Dish {
-  const ingredients: Ingredient[] = (raw.ing || []).map((i) => ({
-    name: i.n,
-    quantity: i.q,
-    unit: i.u,
-    category: i.c,
-  }));
-  return {
-    id: crypto.randomUUID(),
-    name: raw.name,
-    cuisine,
-    meal: slot,
-    servings,
-    totalMinutes: raw.mins,
-    ingredients,
-    recipe: raw.rec || [],
-    tip: raw.tip?.trim() || undefined,
-    macros: {
-      protein: raw.m.p,
-      carbs: raw.m.c,
-      fat: raw.m.f,
-      calories: raw.m.k,
-    },
-  };
-}
-
 function slotCuisineLine(opts: RunOptions): string {
   const map = {
     indian: "Indian",
@@ -164,95 +104,94 @@ function settingsToOptions(settings: Settings, override?: Partial<RunOptions>): 
   };
 }
 
-async function planMenu(
-  client: Anthropic,
-  opts: RunOptions,
-): Promise<{ plan: PlanResult; cost: RunCost }> {
-  const userMsg = `Plan a 7-day menu (21 distinct dishes total). For each day return breakfast/lunch/dinner with name + cuisine ONLY (no recipes yet).
-
-${preferencesBlock(opts)}
-
-Vary breakfast styles (parathas, dosa, oats, eggs, smoothie, poha, chillas). All distinct.
-
-Submit via submit_plan.`;
-
-  const res = await withRetry(() =>
-    client.messages.create({
-      model: MODEL_ID,
-      max_tokens: 700,
-      system: [
-        { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
-      ],
-      tools: [
-        {
-          name: "submit_plan",
-          description: "Submit the 21-dish weekly plan with names + cuisines only.",
-          input_schema: PLAN_SCHEMA as unknown as ToolSchema,
-        },
-      ],
-      tool_choice: { type: "tool", name: "submit_plan" },
-      messages: [{ role: "user", content: userMsg }],
-    }),
-  );
-
-  const toolUse = res.content.find((b) => b.type === "tool_use");
-  if (!toolUse || toolUse.type !== "tool_use") throw new Error("Plan returned no tool use.");
-  if (res.stop_reason === "max_tokens") throw new Error("Plan was truncated.");
-  const plan = toolUse.input as PlanResult;
-  if (!plan.days || plan.days.length !== 7) throw new Error("Plan returned an incomplete week.");
-  return { plan, cost: calcCost(res.usage) };
+// Heuristic categorization for shopping-list aggregation.
+function guessCategory(name: string): IngredientCategory {
+  const n = name.toLowerCase();
+  if (/\b(tomato|onion|potato|aloo|carrot|gajar|spinach|palak|coriander|cilantro|mint|pudina|chili|chilli|mirch|garlic|lehsun|ginger|adrak|capsicum|shimla|cauliflower|gobhi|broccoli|cucumber|kakdi|lemon|nimbu|lime|kale|sprout|methi|fenugreek|peas|matar|beetroot|pumpkin|kaddu|brinjal|baingan|bhindi|okra|mushroom|zucchini)\b/.test(n)) return "produce";
+  if (/\b(milk|doodh|paneer|curd|dahi|yogurt|cheese|butter|makhan|ghee|cream|malai|egg|anda)\b/.test(n)) return "dairy";
+  if (/\b(rice|chawal|basmati|atta|flour|maida|bread|pasta|noodle|quinoa|oats|poha|suji|rava|breadcrumb|tortilla|roti|naan)\b/.test(n)) return "grains";
+  if (/\b(dal|daal|chickpea|chana|rajma|kidney|lentil|bean|sprout|moong|toor|urad|masoor|tofu|soya|tempeh|lobia|kabuli)\b/.test(n)) return "legumes";
+  if (/\b(haldi|turmeric|jeera|cumin|dhaniya|coriander seed|garam masala|chili powder|lal mirch|salt|namak|pepper|kali mirch|hing|asafoetida|rai|mustard seed|saunf|fennel|elaichi|cardamom|dalchini|cinnamon|tej patta|bay leaf|kasuri|methi|clove|laung|star anise|kala namak|chaat masala|amchur)\b/.test(n)) return "spices";
+  if (/\b(oil|tel|sugar|chini|water|pani|honey|shahad|vinegar|sirka|sauce|paste|stock|broth|baking|yeast|cocoa|chocolate|nuts|cashew|kaju|almond|badam|peanut|moongphali|sesame|til|raisin|kishmish|date|khajoor)\b/.test(n)) return "pantry";
+  return "other";
 }
 
-async function detailDay(
-  client: Anthropic,
-  opts: RunOptions,
-  planDay: PlanResult["days"][number],
-  dayIdx: number,
-): Promise<{ day: ToolDayResult; cost: RunCost }> {
-  const userMsg = `Write recipes for day ${dayIdx + 1}'s 3 meals. Use these EXACT names and cuisines:
-- breakfast: "${planDay.breakfast.name}" (${planDay.breakfast.cuisine})
-- lunch: "${planDay.lunch.name}" (${planDay.lunch.cuisine})
-- dinner: "${planDay.dinner.name}" (${planDay.dinner.cuisine})
-
-${preferencesBlock(opts)}
-
-Submit all 3 via submit_day.`;
-
-  const res = await withRetry(() =>
-    client.messages.create({
-      model: MODEL_ID,
-      max_tokens: 1300,
-      system: [
-        { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
-      ],
-      tools: [
-        {
-          name: "submit_day",
-          description: "Submit the 3 dishes for this day using compact field names.",
-          input_schema: DAY_SCHEMA as unknown as ToolSchema,
-        },
-      ],
-      tool_choice: { type: "tool", name: "submit_day" },
-      messages: [{ role: "user", content: userMsg }],
-    }),
-  );
-
-  console.log(`[detailDay ${dayIdx + 1}] usage:`, res.usage, "stop_reason:", res.stop_reason);
-
-  const toolUse = res.content.find((b) => b.type === "tool_use");
-  if (!toolUse || toolUse.type !== "tool_use") {
-    throw new Error(`Day ${dayIdx + 1} returned no tool use.`);
+// Parse "200 g paneer" -> { name: "paneer", quantity: 200, unit: "g" }
+// Handles fractions, missing quantities, parenthetical translations.
+function parseIngredient(raw: string): Ingredient {
+  const trimmed = raw.trim();
+  const m = trimmed.match(/^(\d+(?:\.\d+)?(?:\/\d+)?)\s+(g|ml|tbsp|tsp|piece|pc|cup|katori|pinch|kg|l)\s+(.+)$/i);
+  if (m) {
+    let qty = parseFloat(m[1]);
+    if (m[1].includes("/")) {
+      const [n, d] = m[1].split("/").map(Number);
+      qty = n / d;
+    }
+    let unit = m[2].toLowerCase();
+    if (unit === "pc") unit = "piece";
+    if (unit === "kg") {
+      qty *= 1000;
+      unit = "g";
+    } else if (unit === "l") {
+      qty *= 1000;
+      unit = "ml";
+    }
+    return {
+      name: m[3].toLowerCase().trim(),
+      quantity: qty,
+      unit,
+      category: guessCategory(m[3]),
+    };
   }
-  if (res.stop_reason === "max_tokens") {
-    console.error(`[detailDay ${dayIdx + 1}] truncated`, toolUse.input);
-    throw new Error(`Day ${dayIdx + 1} truncated at ${res.usage.output_tokens} tokens.`);
-  }
-  const day = toolUse.input as ToolDayResult;
-  if (!day?.breakfast?.m || !day?.lunch?.m || !day?.dinner?.m) {
-    throw new Error(`Day ${dayIdx + 1} returned incomplete data.`);
-  }
-  return { day, cost: calcCost(res.usage) };
+  // No quantity given (e.g. "salt", "to taste") — store as 1 piece
+  return {
+    name: trimmed.toLowerCase(),
+    quantity: 1,
+    unit: "piece",
+    category: guessCategory(trimmed),
+  };
 }
+
+type CompactDish = {
+  n: string;          // name
+  c: "i" | "w";       // cuisine
+  t: number;          // total minutes
+  i: string[];        // ingredient strings
+  r: string[];        // recipe steps
+  m: { p: number; c: number; f: number; k: number };
+  x?: string;         // optional tip
+};
+
+function compactToDish(d: CompactDish, slot: MealSlot, servings: number): Dish {
+  return {
+    id: crypto.randomUUID(),
+    name: d.n,
+    cuisine: d.c === "w" ? "western" : "indian",
+    meal: slot,
+    servings,
+    totalMinutes: d.t,
+    ingredients: (d.i || []).map(parseIngredient),
+    recipe: d.r || [],
+    tip: d.x?.trim() || undefined,
+    macros: {
+      protein: d.m.p,
+      carbs: d.m.c,
+      fat: d.m.f,
+      calories: d.m.k,
+    },
+  };
+}
+
+const COMPACT_FORMAT_INSTRUCTIONS = `Output a single JSON array of 21 dish objects. Order: day1.B, day1.L, day1.D, day2.B, day2.L, day2.D, ... day7.B, day7.L, day7.D. NO prose, NO markdown fences, JUST the array.
+
+Each dish:
+{"n":"Dish Name","c":"i" or "w","t":<total minutes>,"i":["<qty> <unit> <name>", ...],"r":["step 1.","step 2."],"m":{"p":<g>,"c":<g>,"f":<g>,"k":<kcal>},"x":"<optional tip or omit>"}
+
+- 8-12 ingredients per dish, lowercase. Format: "<number> <unit> <name>". Unit: g, ml, tbsp, tsp, piece, cup, katori, pinch.
+- 4-5 recipe steps, ≤100 chars each, with sensory cue and desi terms where natural.
+- Macros per serving, realistic.
+- All 21 dishes distinct.
+- DO NOT use unicode quotes — only standard ASCII " for JSON strings.`;
 
 export async function generateWeek(
   settings: Settings,
@@ -261,37 +200,82 @@ export async function generateWeek(
 ): Promise<{ menu: WeeklyMenu; cost: RunCost }> {
   const client = getClient(settings.apiKey);
   const opts = settingsToOptions(settings, override);
+  onProgress?.("Generating menu…");
 
-  onProgress?.("Planning your week…");
-  const planRes = await planMenu(client, opts);
-  let totalCost = planRes.cost;
+  const userMsg = `Plan a 7-day vegetarian menu (21 distinct dishes total).
 
-  let done = 0;
-  const total = 7;
-  onProgress?.(`Cooking 0/${total} days…`, 0, total);
+${preferencesBlock(opts)}
 
-  const detailResults = await mapWithConcurrency(
-    planRes.plan.days,
-    3,
-    async (planDay, i) => {
-      const result = await detailDay(client, opts, planDay, i);
-      done++;
-      onProgress?.(`Cooking ${done}/${total} days…`, done, total);
-      return { ...result, planDay };
-    },
+Vary breakfast styles across the week (parathas, dosa, oats, eggs, smoothie, poha, chillas).
+
+${COMPACT_FORMAT_INSTRUCTIONS}`;
+
+  const res = await withRetry(() =>
+    client.messages.create({
+      model: MODEL_ID,
+      max_tokens: 7000,
+      system: [
+        { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
+      ],
+      messages: [
+        { role: "user", content: userMsg },
+        { role: "assistant", content: "[" }, // prefill — model continues the JSON array
+      ],
+    }),
   );
 
-  for (const r of detailResults) totalCost = addCost(totalCost, r.cost);
+  console.log("[generateWeek] usage:", res.usage, "stop_reason:", res.stop_reason);
 
+  const textBlock = res.content.find((b) => b.type === "text");
+  if (!textBlock || textBlock.type !== "text") {
+    throw new Error("Model returned no text content.");
+  }
+
+  // Reconstruct full JSON: prefill "[" + continuation.
+  let body = "[" + textBlock.text;
+  // Trim anything after the closing bracket (if model added prose despite instructions).
+  const lastClose = body.lastIndexOf("]");
+  if (lastClose >= 0) body = body.slice(0, lastClose + 1);
+
+  let dishes: CompactDish[];
+  try {
+    dishes = JSON.parse(body);
+  } catch (e) {
+    console.error("[generateWeek] JSON parse failed. body:", body.slice(0, 500), "...");
+    throw new Error(`Could not parse menu JSON. ${(e as Error).message}`);
+  }
+
+  if (!Array.isArray(dishes) || dishes.length !== 21) {
+    throw new Error(`Expected 21 dishes, got ${dishes?.length ?? "none"}. Try again.`);
+  }
+
+  // Validate every dish has required fields.
+  for (let i = 0; i < dishes.length; i++) {
+    const d = dishes[i];
+    if (!d?.n || !d?.m || !Array.isArray(d?.i) || !Array.isArray(d?.r)) {
+      console.error(`[generateWeek] dish ${i} malformed:`, d);
+      throw new Error(`Dish ${i + 1} is malformed. Try again.`);
+    }
+  }
+
+  if (res.stop_reason === "max_tokens") {
+    throw new Error(
+      `Generation stopped at token limit (${res.usage.output_tokens}/7000). The week may be incomplete despite parsing. Try again.`,
+    );
+  }
+
+  // Assemble menu.
   const today = new Date();
-  const days = detailResults.map((r, i) => {
+  const slots: MealSlot[] = ["breakfast", "lunch", "dinner"];
+  const days = Array.from({ length: 7 }, (_, dayIdx) => {
     const date = new Date(today);
-    date.setDate(today.getDate() + i);
+    date.setDate(today.getDate() + dayIdx);
+    const start = dayIdx * 3;
     return {
       date: date.toISOString().slice(0, 10),
-      breakfast: unpack(r.day.breakfast, r.planDay.breakfast.cuisine, "breakfast", opts.servings),
-      lunch: unpack(r.day.lunch, r.planDay.lunch.cuisine, "lunch", opts.servings),
-      dinner: unpack(r.day.dinner, r.planDay.dinner.cuisine, "dinner", opts.servings),
+      breakfast: compactToDish(dishes[start], slots[0], opts.servings),
+      lunch: compactToDish(dishes[start + 1], slots[1], opts.servings),
+      dinner: compactToDish(dishes[start + 2], slots[2], opts.servings),
     };
   });
 
@@ -302,7 +286,51 @@ export async function generateWeek(
       weekStart: today.toISOString().slice(0, 10),
       days,
     },
-    cost: totalCost,
+    cost: calcCost(res.usage),
+  };
+}
+
+// Compact wire format from tool_use (still used for day + swap — single calls, no rate-limit pressure).
+type RawIng = { n: string; q: number; u: string; c: IngredientCategory };
+type RawMacros = { p: number; c: number; f: number; k: number };
+type RawDish = {
+  name: string;
+  mins: number;
+  ing: RawIng[];
+  rec: string[];
+  tip?: string;
+  m: RawMacros;
+};
+type ToolDayResult = { breakfast: RawDish; lunch: RawDish; dinner: RawDish };
+
+function unpackTool(
+  raw: RawDish,
+  cuisine: Cuisine,
+  slot: MealSlot,
+  servings: number,
+): Dish {
+  const ingredients: Ingredient[] = (raw.ing || []).map((i) => ({
+    name: i.n,
+    quantity: i.q,
+    unit: i.u,
+    category: i.c,
+  }));
+  return {
+    id: crypto.randomUUID(),
+    name: raw.name,
+    cuisine,
+    meal: slot,
+    servings,
+    totalMinutes: raw.mins,
+    ingredients,
+    recipe: raw.rec || [],
+    tip: raw.tip?.trim() || undefined,
+    macros: {
+      protein: raw.m.p,
+      carbs: raw.m.c,
+      fat: raw.m.f,
+      calories: raw.m.k,
+    },
   };
 }
 
@@ -343,23 +371,15 @@ Submit via submit_day.`;
   console.log("[generateDay] usage:", res.usage, "stop_reason:", res.stop_reason);
 
   const toolUse = res.content.find((b) => b.type === "tool_use");
-  if (!toolUse || toolUse.type !== "tool_use") {
-    console.error("[generateDay] non-tool content:", res.content);
-    throw new Error("Model did not return a menu.");
-  }
+  if (!toolUse || toolUse.type !== "tool_use") throw new Error("Model returned no tool use.");
   if (res.stop_reason === "max_tokens") {
-    console.error("[generateDay] truncated. partial input:", toolUse.input);
-    throw new Error(
-      `Truncated at ${res.usage.output_tokens} output tokens (limit 4000). Schema still too verbose — file an issue.`,
-    );
+    throw new Error(`Truncated at ${res.usage.output_tokens}/4000 tokens. Try again.`);
   }
   const day = toolUse.input as ToolDayResult;
   if (!day?.breakfast?.m || !day?.lunch?.m || !day?.dinner?.m) {
-    console.error("[generateDay] incomplete day:", day);
     throw new Error("Got an incomplete menu. Try again.");
   }
 
-  // Infer cuisine from slot pref or fallback.
   const guess = (s: MealSlot): Cuisine =>
     opts.slotCuisine[s] === "western" ? "western" : "indian";
   const today = new Date().toISOString().slice(0, 10);
@@ -371,9 +391,9 @@ Submit via submit_day.`;
       days: [
         {
           date: today,
-          breakfast: unpack(day.breakfast, guess("breakfast"), "breakfast", opts.servings),
-          lunch: unpack(day.lunch, guess("lunch"), "lunch", opts.servings),
-          dinner: unpack(day.dinner, guess("dinner"), "dinner", opts.servings),
+          breakfast: unpackTool(day.breakfast, guess("breakfast"), "breakfast", opts.servings),
+          lunch: unpackTool(day.lunch, guess("lunch"), "lunch", opts.servings),
+          dinner: unpackTool(day.dinner, guess("dinner"), "dinner", opts.servings),
         },
       ],
     },
@@ -408,7 +428,7 @@ Submit via submit_dish.`;
   const res = await withRetry(() =>
     client.messages.create({
       model: MODEL_ID,
-      max_tokens: 600,
+      max_tokens: 1500,
       system: [
         { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
       ],
@@ -424,16 +444,20 @@ Submit via submit_dish.`;
     }),
   );
 
+  console.log("[swapDish] usage:", res.usage, "stop_reason:", res.stop_reason);
+
   const toolUse = res.content.find((b) => b.type === "tool_use");
   if (!toolUse || toolUse.type !== "tool_use") throw new Error("Swap returned no dish.");
-  if (res.stop_reason === "max_tokens") throw new Error("Swap was truncated. Try again.");
+  if (res.stop_reason === "max_tokens") {
+    throw new Error(`Swap truncated at ${res.usage.output_tokens}/1500. Try again.`);
+  }
   const raw = toolUse.input as RawDish;
   if (!raw?.m) throw new Error("Swap returned incomplete data.");
 
   const cuisine: Cuisine =
-    cuisinePref === "western" ? "western" : cuisinePref === "indian" ? "indian" : "indian";
+    cuisinePref === "western" ? "western" : "indian";
   return {
-    dish: unpack(raw, cuisine, slot, opts.servings),
+    dish: unpackTool(raw, cuisine, slot, opts.servings),
     cost: calcCost(res.usage),
   };
 }
