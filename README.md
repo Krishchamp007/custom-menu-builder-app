@@ -2,7 +2,7 @@
 
 Mobile-first PWA that generates a 7-day (or single-day) high-protein vegetarian menu — Indian + western — using the Anthropic Claude API. Includes per-meal cuisine preferences, swap-by-dish, aggregated shopping list, recipes written for an Indian home cook, and PDF export.
 
-Live deployment uses a Cloudflare Pages serverless proxy so the API key stays server-side; users authenticate with a shared passcode.
+Live deployment uses a Cloudflare Worker as a proxy so the API key stays server-side; users authenticate with a shared passcode.
 
 ## Local development
 
@@ -45,9 +45,9 @@ Cloudflare will auto-deploy on every `git push` to `main`.
 
 Send them the URL + the passcode. They open Settings, paste the passcode, hit **Test**, and start generating.
 
-### Why Cloudflare Pages and not Vercel?
+### Why Cloudflare Workers and not Vercel?
 
-Vercel's hobby tier kills serverless functions at 25s, which clips our 30-40s week generation. Cloudflare Pages doesn't count network-wait time as CPU, so the long Anthropic call doesn't time out.
+Vercel's hobby tier kills serverless functions at 25s, which clips our 30-40s week generation. Cloudflare Workers don't count network-wait time as CPU, so the long Anthropic call doesn't time out.
 
 ## Architecture overview
 
