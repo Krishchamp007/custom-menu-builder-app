@@ -22,23 +22,22 @@ For local dev, you have two options for auth:
    - In Settings → Passcode, enter the same passcode you set on Cloudflare.
    - Requires the deployed app to be running (or `wrangler pages dev` locally).
 
-## Deploying to Cloudflare Pages
+## Deploying to Cloudflare Workers
 
-This is what powers the shareable link.
+This is what powers the shareable link. Deployed as a Worker with Static Assets — `dist/` is served as the static frontend, and `worker.js` proxies `/api/anthropic` to the Anthropic API.
 
 ### One-time setup
 
 1. Push your code to GitHub (already done if you cloned this).
-2. Sign in to Cloudflare → **Workers & Pages** → **Create** → **Pages** → **Connect to Git**.
+2. Sign in to Cloudflare → **Workers & Pages** → **Create** → **Workers** → **Get started → Connect to Git**.
 3. Select your `custom-menu-builder-app` repo.
-4. Build configuration:
-   - **Framework preset:** Vite
+4. The build/deploy commands are auto-detected from `wrangler.jsonc`:
    - **Build command:** `npm run build`
-   - **Build output directory:** `dist`
-5. Under **Environment variables** add:
-   - `ANTHROPIC_API_KEY` = your `sk-ant-...` key (Production)
-   - `APP_PASSCODE` = a passcode you'll share with friends (Production)
-6. Deploy.
+   - **Deploy command:** `npx wrangler deploy`
+5. **Click "Advanced settings"** → add environment variables (Encrypt both):
+   - `ANTHROPIC_API_KEY` = your `sk-ant-...` key
+   - `APP_PASSCODE` = a passcode you'll share with friends
+6. Click **Deploy**.
 
 Cloudflare will auto-deploy on every `git push` to `main`.
 
@@ -56,7 +55,7 @@ See [CLAUDE.md](CLAUDE.md) for the deeper architectural notes (rate-limit math, 
 
 - `src/lib/generateWeek.ts` — week generation uses **JSON prefill** (single Anthropic call, model continues `[`, we `JSON.parse` the result). Day + swap use `tool_use` (single call, no rate-limit pressure).
 - `src/lib/anthropic.ts` — auth resolution: passcode → proxy via `/api/anthropic`, otherwise direct SDK with the user's key.
-- `functions/api/anthropic.ts` — Cloudflare Pages function that proxies to Anthropic, gated by `APP_PASSCODE`.
+- `worker.js` + `wrangler.jsonc` — Cloudflare Worker entry point. Routes `/api/anthropic` to a passcode-gated proxy, falls back to static assets for everything else.
 
 ## Scripts
 

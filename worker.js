@@ -1,28 +1,30 @@
-// Cloudflare Pages serverless function.
-// Proxies Anthropic Messages API calls so the API key stays server-side.
-// Friends authenticate with a shared passcode set as an environment variable.
-//
-// Required env vars (configure in the Cloudflare Pages dashboard):
-//   ANTHROPIC_API_KEY — your sk-ant-... key
-//   APP_PASSCODE      — the shared passcode you give friends
+// Cloudflare Worker entry point.
+// Serves the built Vite app from dist/ via the ASSETS binding,
+// and proxies /api/anthropic requests to the Anthropic API.
 
-interface Env {
-  ANTHROPIC_API_KEY: string;
-  APP_PASSCODE: string;
-}
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
 
-const json = (data: unknown, status = 200, extra: Record<string, string> = {}) =>
+    if (url.pathname === "/api/anthropic") {
+      return handleAnthropic(request, env);
+    }
+
+    // Everything else: static asset (Vite SPA fallback handled in wrangler.jsonc).
+    return env.ASSETS.fetch(request);
+  },
+};
+
+const json = (data, status = 200, extra = {}) =>
   new Response(JSON.stringify(data), {
     status,
     headers: { "Content-Type": "application/json", ...extra },
   });
 
-export const onRequestPost = async (context: {
-  request: Request;
-  env: Env;
-}): Promise<Response> => {
-  const { request, env } = context;
-
+async function handleAnthropic(request, env) {
+  if (request.method !== "POST") {
+    return json({ error: "Method not allowed" }, 405);
+  }
   if (!env.APP_PASSCODE) {
     return json({ error: "Server is missing APP_PASSCODE env var." }, 500);
   }
@@ -47,14 +49,9 @@ export const onRequestPost = async (context: {
     body,
   });
 
-  // Forward retry-after so client-side withRetry() can honor rate limits.
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const headers = { "Content-Type": "application/json" };
   const retryAfter = upstream.headers.get("retry-after");
   if (retryAfter) headers["retry-after"] = retryAfter;
 
   return new Response(upstream.body, { status: upstream.status, headers });
-};
-
-// Block other methods.
-export const onRequest = async () =>
-  json({ error: "Method not allowed." }, 405);
+}
