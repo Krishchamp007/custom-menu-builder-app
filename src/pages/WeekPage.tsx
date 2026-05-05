@@ -2,7 +2,7 @@ import { useState } from "react";
 import { CalendarDays, Download, Sun, Sparkles } from "lucide-react";
 import { useStore } from "@/lib/storage";
 import { useToast } from "@/components/Toast";
-import { ENV_API_KEY, resolveApiKey } from "@/lib/anthropic";
+import { hasAuth } from "@/lib/anthropic";
 import { generateDay, generateWeek, swapDish } from "@/lib/generateWeek";
 import { downloadMenuPdf } from "@/lib/pdf";
 import { weekMacros, fmtMacro } from "@/lib/macros";
@@ -36,8 +36,8 @@ export default function WeekPage() {
   });
 
   const openPrefs = (mode: GenMode) => {
-    if (!resolveApiKey(settings.apiKey)) {
-      toast.push("Add your Anthropic API key in Settings or .env.local.", "error");
+    if (!hasAuth(settings)) {
+      toast.push("Set a passcode in Settings first.", "error");
       return;
     }
     setPrefs({ open: true, mode });
@@ -112,7 +112,7 @@ export default function WeekPage() {
     return (
       <>
         <EmptyState
-          hasKey={Boolean(resolveApiKey(settings.apiKey)) || Boolean(ENV_API_KEY)}
+          hasKey={hasAuth(settings)}
           generating={generating}
           progress={progress}
           onGenerateWeek={() => openPrefs("week")}

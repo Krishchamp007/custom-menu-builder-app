@@ -62,7 +62,7 @@ export function EmptyState({
       ) : (
         <Link to="/settings" className="btn-ghost py-3.5 text-base">
           <KeyRound size={16} />
-          Add your Anthropic API key
+          Enter passcode to start
         </Link>
       )}
     </div>

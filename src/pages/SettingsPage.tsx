@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { Eye, EyeOff, Plus, Trash2, X, ShieldCheck } from "lucide-react";
+import { Eye, EyeOff, Lock, Plus, Trash2, X, ShieldCheck } from "lucide-react";
 import { useStore } from "@/lib/storage";
 import { useToast } from "@/components/Toast";
-import { ENV_API_KEY, pingKey } from "@/lib/anthropic";
+import { ENV_API_KEY, pingAuth } from "@/lib/anthropic";
 import type { CuisinePref, MealSlot } from "@/types";
 
 const SLOT_LABELS: Record<MealSlot, string> = {
@@ -20,20 +20,24 @@ export default function SettingsPage() {
   const { settings, setSettings, clearAll } = useStore();
   const toast = useToast();
   const [showKey, setShowKey] = useState(false);
+  const [showPasscode, setShowPasscode] = useState(false);
   const [testing, setTesting] = useState(false);
   const [dislike, setDislike] = useState("");
 
   const handleTest = async () => {
-    if (!settings.apiKey && !ENV_API_KEY) {
-      toast.push("Paste a key first, or set VITE_ANTHROPIC_API_KEY in .env.local.", "error");
+    if (!settings.passcode && !settings.apiKey && !ENV_API_KEY) {
+      toast.push("Set a passcode (deployed app) or API key (dev) first.", "error");
       return;
     }
     setTesting(true);
     try {
-      await pingKey(settings.apiKey);
-      toast.push("Key works.", "success");
+      await pingAuth(settings);
+      toast.push(
+        settings.passcode ? "Passcode works." : "Key works.",
+        "success",
+      );
     } catch (e) {
-      toast.push(e instanceof Error ? e.message : "Key failed.", "error");
+      toast.push(e instanceof Error ? e.message : "Auth failed.", "error");
     } finally {
       setTesting(false);
     }
@@ -64,22 +68,54 @@ export default function SettingsPage() {
       </header>
 
       <section className="card p-4 space-y-3">
-        <h2 className="text-sm font-semibold">Anthropic API key</h2>
-        {ENV_API_KEY && !settings.apiKey ? (
-          <div className="flex items-center gap-2 bg-elevated border border-accent/40 rounded-xl px-3 py-2.5 text-sm">
-            <ShieldCheck size={16} className="text-accent" />
-            <span>Using key from .env.local</span>
+        <div className="flex items-center gap-2">
+          <Lock size={16} className="text-accent" />
+          <h2 className="text-sm font-semibold">Passcode</h2>
+        </div>
+        <p className="text-xs text-muted -mt-1">
+          Enter the shared passcode you were given to use the deployed app.
+        </p>
+        <div className="flex gap-2">
+          <div className="flex-1 relative">
+            <input
+              type={showPasscode ? "text" : "password"}
+              placeholder="Enter passcode"
+              value={settings.passcode}
+              onChange={(e) => setSettings({ passcode: e.target.value })}
+              className="input pr-10"
+              autoComplete="off"
+            />
             <button
-              onClick={handleTest}
-              disabled={testing}
-              className="ml-auto btn-subtle py-1.5 px-3 text-xs"
+              type="button"
+              onClick={() => setShowPasscode((v) => !v)}
+              className="absolute inset-y-0 right-0 px-3 text-muted hover:text-text"
+              aria-label={showPasscode ? "Hide passcode" : "Show passcode"}
             >
-              {testing ? "Testing…" : "Test"}
+              {showPasscode ? <EyeOff size={16} /> : <Eye size={16} />}
             </button>
           </div>
-        ) : (
-          <div className="flex gap-2">
-            <div className="flex-1 relative">
+          <button onClick={handleTest} disabled={testing} className="btn-ghost shrink-0">
+            {testing ? "Testing…" : "Test"}
+          </button>
+        </div>
+      </section>
+
+      <details className="card p-4 [&_summary]:cursor-pointer">
+        <summary className="text-sm font-semibold text-muted">
+          Advanced: use my own Anthropic API key (dev mode)
+        </summary>
+        <div className="space-y-3 mt-3">
+          <p className="text-xs text-muted">
+            For local development. The deployed app uses the passcode above instead.
+            If a key is set here AND a passcode, the passcode wins.
+          </p>
+          {ENV_API_KEY && !settings.apiKey ? (
+            <div className="flex items-center gap-2 bg-elevated border border-accent/40 rounded-xl px-3 py-2.5 text-sm">
+              <ShieldCheck size={16} className="text-accent" />
+              <span>Using key from .env.local</span>
+            </div>
+          ) : (
+            <div className="relative">
               <input
                 type={showKey ? "text" : "password"}
                 placeholder={ENV_API_KEY ? "Override .env.local key…" : "sk-ant-…"}
@@ -97,17 +133,9 @@ export default function SettingsPage() {
                 {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
               </button>
             </div>
-            <button onClick={handleTest} disabled={testing} className="btn-ghost shrink-0">
-              {testing ? "Testing…" : "Test"}
-            </button>
-          </div>
-        )}
-        <p className="text-xs text-muted">
-          {ENV_API_KEY
-            ? "Edit .env.local and restart the dev server to change. Field above overrides it."
-            : "Stored in your browser only. Get one at console.anthropic.com."}
-        </p>
-      </section>
+          )}
+        </div>
+      </details>
 
       <section className="card p-4 space-y-5">
         <h2 className="text-sm font-semibold">Defaults for every menu</h2>

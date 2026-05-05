@@ -1,41 +1,65 @@
-# Weekly Menu
+# Custom Menu Builder
 
-Mobile-first web app that generates a 7-day high-protein vegetarian menu (Indian + western) using Claude. Each dish includes a step-by-step recipe for the cook, ingredients, and macros. Swap any dish, view a consolidated shopping list, and download the whole week as a PDF.
+Mobile-first PWA that generates a 7-day (or single-day) high-protein vegetarian menu — Indian + western — using the Anthropic Claude API. Includes per-meal cuisine preferences, swap-by-dish, aggregated shopping list, recipes written for an Indian home cook, and PDF export.
 
-## Setup
+Live deployment uses a Cloudflare Pages serverless proxy so the API key stays server-side; users authenticate with a shared passcode.
+
+## Local development
 
 ```sh
 npm install
 npm run dev
 ```
 
-Open `http://localhost:5173/` on your phone (same Wi-Fi: run `npm run dev -- --host`) or in Chrome DevTools mobile emulation.
+Open `http://localhost:5173/` (or `npm run dev -- --host` for phone testing on the same Wi-Fi).
 
-## First run
+For local dev, you have two options for auth:
 
-1. Open **Settings** (bottom-right tab).
-2. Paste your Anthropic API key (`sk-ant-…`) — get one at [console.anthropic.com](https://console.anthropic.com). Tap **Test** to verify.
-3. Adjust daily protein target (default 100 g), servings per dish (default 2), and cuisine mix.
-4. Add any disliked ingredients (e.g. `mushrooms`).
-5. Go to **Week** → **Generate this week**. ~20–30 seconds.
+1. **Use your own Anthropic API key** (no backend needed):
+   - Create `.env.local`: `VITE_ANTHROPIC_API_KEY=sk-ant-...`
+   - Or paste it in **Settings → Advanced**.
+2. **Use the deployed proxy**:
+   - In Settings → Passcode, enter the same passcode you set on Cloudflare.
+   - Requires the deployed app to be running (or `wrangler pages dev` locally).
 
-## Features
+## Deploying to Cloudflare Pages
 
-- **Weekly menu**: 21 dishes (B/L/D × 7) — high protein, vegetarian, mixed Indian + western, no repeats.
-- **Recipes**: tap any dish for a full ingredient list and numbered method.
-- **Swap**: shuffle icon on any tile re-rolls a single dish without duplicating the rest of the week. Optional "reason" hint.
-- **Shopping list**: ingredients aggregated across the week, scaled to your serving count, grouped by supermarket aisle.
-- **Macros everywhere**: per-dish, daily totals, weekly averages.
-- **Download PDF**: weekly grid + shopping list + every recipe on its own printable page.
-- **PWA**: add to home screen on iPhone/Android for an app-like experience.
-- **Local-only**: API key, settings, and saved menu live in your browser. No backend, no login.
+This is what powers the shareable link.
 
-## Stack
+### One-time setup
 
-Vite + React + TypeScript · Tailwind CSS · zustand · `@anthropic-ai/sdk` (Sonnet 4.6 with prompt caching + tool_use) · jsPDF · vite-plugin-pwa.
+1. Push your code to GitHub (already done if you cloned this).
+2. Sign in to Cloudflare → **Workers & Pages** → **Create** → **Pages** → **Connect to Git**.
+3. Select your `custom-menu-builder-app` repo.
+4. Build configuration:
+   - **Framework preset:** Vite
+   - **Build command:** `npm run build`
+   - **Build output directory:** `dist`
+5. Under **Environment variables** add:
+   - `ANTHROPIC_API_KEY` = your `sk-ant-...` key (Production)
+   - `APP_PASSCODE` = a passcode you'll share with friends (Production)
+6. Deploy.
+
+Cloudflare will auto-deploy on every `git push` to `main`.
+
+### Sharing with friends
+
+Send them the URL + the passcode. They open Settings, paste the passcode, hit **Test**, and start generating.
+
+### Why Cloudflare Pages and not Vercel?
+
+Vercel's hobby tier kills serverless functions at 25s, which clips our 30-40s week generation. Cloudflare Pages doesn't count network-wait time as CPU, so the long Anthropic call doesn't time out.
+
+## Architecture overview
+
+See [CLAUDE.md](CLAUDE.md) for the deeper architectural notes (rate-limit math, schema choices, etc.).
+
+- `src/lib/generateWeek.ts` — week generation uses **JSON prefill** (single Anthropic call, model continues `[`, we `JSON.parse` the result). Day + swap use `tool_use` (single call, no rate-limit pressure).
+- `src/lib/anthropic.ts` — auth resolution: passcode → proxy via `/api/anthropic`, otherwise direct SDK with the user's key.
+- `functions/api/anthropic.ts` — Cloudflare Pages function that proxies to Anthropic, gated by `APP_PASSCODE`.
 
 ## Scripts
 
 - `npm run dev` — local dev server
-- `npm run build` — production build (`tsc -b && vite build`)
+- `npm run build` — `tsc -b && vite build`
 - `npm run preview` — serve the production build

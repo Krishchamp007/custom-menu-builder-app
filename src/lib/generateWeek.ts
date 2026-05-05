@@ -198,7 +198,7 @@ export async function generateWeek(
   onProgress?: ProgressCb,
   override?: Partial<RunOptions>,
 ): Promise<{ menu: WeeklyMenu; cost: RunCost }> {
-  const client = getClient(settings.apiKey);
+  const client = getClient(settings);
   const opts = settingsToOptions(settings, override);
   onProgress?.("Generating menu…");
 
@@ -339,7 +339,7 @@ export async function generateDay(
   onProgress?: ProgressCb,
   override?: Partial<RunOptions>,
 ): Promise<{ menu: WeeklyMenu; cost: RunCost }> {
-  const client = getClient(settings.apiKey);
+  const client = getClient(settings);
   const opts = settingsToOptions(settings, override);
   onProgress?.("Generating today's menu…");
 
@@ -408,7 +408,7 @@ export async function swapDish(
   slot: MealSlot,
   reason?: string,
 ): Promise<{ dish: Dish; cost: RunCost }> {
-  const client = getClient(settings.apiKey);
+  const client = getClient(settings);
   const opts = settingsToOptions(settings);
   const slots: MealSlot[] = ["breakfast", "lunch", "dinner"];
   const existingNames = current.days

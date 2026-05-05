@@ -55,7 +55,8 @@ export type WeeklyMenu = {
 export type SlotCuisine = Record<MealSlot, CuisinePref>;
 
 export type Settings = {
-  apiKey: string;
+  apiKey: string;     // direct mode: user's own Anthropic key (dev / personal use)
+  passcode: string;   // proxy mode: shared passcode for the deployed app
   proteinTargetG: number;
   caloriesTarget: number;
   servings: number;
@@ -74,6 +75,7 @@ export type RunOptions = {
 
 export const DEFAULT_SETTINGS: Settings = {
   apiKey: "",
+  passcode: "",
   proteinTargetG: 100,
   caloriesTarget: 2000,
   servings: 2,

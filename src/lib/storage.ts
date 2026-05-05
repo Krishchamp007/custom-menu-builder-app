@@ -70,6 +70,9 @@ export const useStore = create<State & Actions>()(
         if (typeof state.settings.caloriesTarget !== "number") {
           state.settings.caloriesTarget = 2000;
         }
+        if (typeof state.settings.passcode !== "string") {
+          state.settings.passcode = "";
+        }
         const m = state.menu;
         if (!m || !Array.isArray(m.days) || m.days.length === 0) {
           state.menu = null;
